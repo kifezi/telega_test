@@ -4,10 +4,7 @@ import EUpdate.*
 import org.drinkless.tdlib.Client
 import org.drinkless.tdlib.Log
 import org.drinkless.tdlib.TdApi
-import java.io.BufferedReader
-import java.io.IOError
-import java.io.IOException
-import java.io.InputStreamReader
+import java.io.*
 import java.util.*
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
@@ -26,9 +23,8 @@ open class MClient {
     private val usersFullInfo = ConcurrentHashMap<Int, TdApi.UserFullInfo>()
     private val basicGroupsFullInfo = ConcurrentHashMap<Int, TdApi.BasicGroupFullInfo>()
     private val supergroupsFullInfo = ConcurrentHashMap<Int, TdApi.SupergroupFullInfo>()
-    // ------- variables -------
+
     private var client: Client? = null
-    // -------
     private val util = Util()
     private val auth = Auth()
     private val authHandler = AuthHandler()
@@ -56,10 +52,11 @@ open class MClient {
         private val gotAuth = authLock.newCondition()
         private var authState: EAuthState? = null
 
-        fun onAuthorizationStateUpdated(authState2: TdApi.AuthorizationState?) {
-            if (authState2 != null) {
-                authState = authStateMap[authState2.constructor]
+        fun onAuthorizationStateUpdated(authStateObj: TdApi.AuthorizationState?) {
+            if (authStateObj != null) {
+                authState = authStateMap[authStateObj.constructor]
             }
+            outDbg("<< AuthState", authState)
             when (authState) {
                 WaitTdlibParameters -> {
                     val parameters = TdApi.TdlibParameters().also {
@@ -70,7 +67,7 @@ open class MClient {
                             apiId = 94575
                             apiHash = "a3406de8d171bb422bb6ddf3bbd800e2"
                             systemLanguageCode = "en"
-                            deviceModel = "Desktop"
+                            deviceModel = "Air"
                             systemVersion = "Unknown"
                             applicationVersion = "1.0"
                             enableStorageOptimizer = true
@@ -79,19 +76,19 @@ open class MClient {
                     send(TdApi.SetTdlibParameters(parameters), authHandler)
                 }
                 WaitEncryptionKey -> {
-                    client?.send(TdApi.CheckDatabaseEncryptionKey(), authHandler)
+                    send(TdApi.CheckDatabaseEncryptionKey(), authHandler)
                 }
                 WaitPhoneNumber -> {
                     val phoneNumber = promptString("Please enter phone number: ")
-                    client?.send(TdApi.SetAuthenticationPhoneNumber(phoneNumber, false, false), authHandler)
+                    send(TdApi.SetAuthenticationPhoneNumber(phoneNumber, false, false), authHandler)
                 }
                 WaitCode -> {
                     val code = promptString("Please enter authentication code: ")
-                    client?.send(TdApi.CheckAuthenticationCode(code, "", ""), authHandler)
+                    send(TdApi.CheckAuthenticationCode(code, "", ""), authHandler)
                 }
                 WaitPassword -> {
                     val password = promptString("Please enter password: ")
-                    client?.send(TdApi.CheckAuthenticationPassword(password), authHandler)
+                    send(TdApi.CheckAuthenticationPassword(password), authHandler)
                 }
                 Ready -> {
                     haveAuth.set(true)
@@ -101,7 +98,7 @@ open class MClient {
                 }
                 LoggingOut -> {
                     haveAuth.set(false)
-                    println("Logging out")
+                    outDbg("Logging out")
                 }
                 Closing -> {
                     haveAuth.set(false)
@@ -138,49 +135,57 @@ open class MClient {
     }
 
     private inner class UpdateHandler: Client.ResultHandler {
-        override fun onResult(resObj: TdApi.Object?) {
-
-            when (updateMap[resObj?.constructor]) {
+        override fun onResult(updObj: TdApi.Object?) {
+            val updType = updateMap[updObj?.constructor]
+            println("<< Update $updType")
+            when (updType) {
                 UpdateAuthorizationState -> {
-                    val state = resObj as TdApi.UpdateAuthorizationState
+                    val state = updObj as TdApi.UpdateAuthorizationState
                     auth.onAuthorizationStateUpdated(state.authorizationState)
                 }
                 UpdateUser -> {
-                    val updateUser = resObj as TdApi.UpdateUser
+                    val updateUser = updObj as TdApi.UpdateUser
                     users[updateUser.user.id] = updateUser.user
+                    with(updateUser.user) {
+                        outDbg("<< UpdateUser", "$firstName $lastName ($username) ($phoneNumber)")
+                    }
                 }
                 UpdateUserStatus -> {
-                    val updateUserStatus = resObj as TdApi.UpdateUserStatus
+                    val updateUserStatus = updObj as TdApi.UpdateUserStatus
                     users[updateUserStatus.userId]?.let {
                         synchronized(users) {
                             it.status = updateUserStatus.status
                         }
+                        outDbg("<< UpdateUserStatus", "${it.firstName} ${it.lastName} " +
+                                "(${it.username}) (${it.phoneNumber}): ${updateUserStatus.status}")
                     }
                 }
                 UpdateBasicGroup -> {
-                    val updateBasicGroup = resObj as TdApi.UpdateBasicGroup
+                    val updateBasicGroup = updObj as TdApi.UpdateBasicGroup
                     basicGroups[updateBasicGroup.basicGroup.id] = updateBasicGroup.basicGroup
                 }
                 UpdateSupergroup -> {
-                    val updateSupergroup = resObj as TdApi.UpdateSupergroup
+                    val updateSupergroup = updObj as TdApi.UpdateSupergroup
                     supergroups[updateSupergroup.supergroup.id] = updateSupergroup.supergroup
+                    outDbg("<< UpdateSupergroup", updateSupergroup)
                 }
                 UpdateSecretChat -> {
-                    val updateSecretChat = resObj as TdApi.UpdateSecretChat
+                    val updateSecretChat = updObj as TdApi.UpdateSecretChat
                     secretChats[updateSecretChat.secretChat.id] = updateSecretChat.secretChat
                 }
                 UpdateNewChat -> {
-                    val updateNewChat = resObj as TdApi.UpdateNewChat
+                    val updateNewChat = updObj as TdApi.UpdateNewChat
                     val chat = updateNewChat.chat
-                    synchronized(chat) {
+                    synchronized(chats) {
                         chats[chat.id] = chat
                         val order = chat.order
                         chat.order = 0
                         util.setChatOrder(chat, order)
                     }
+                    outDbg("<< UpdateNewChat", updateNewChat)
                 }
                 UpdateChatTitle -> {
-                    val updateChat = resObj as TdApi.UpdateChatTitle
+                    val updateChat = updObj as TdApi.UpdateChatTitle
                     chats[updateChat.chatId]?.let {
                         synchronized(it) {
                             it.title = updateChat.title
@@ -188,7 +193,7 @@ open class MClient {
                     }
                 }
                 UpdateChatPhoto -> {
-                    val updateChat = resObj as TdApi.UpdateChatPhoto
+                    val updateChat = updObj as TdApi.UpdateChatPhoto
                     chats[updateChat.chatId]?.let {
                         synchronized(it) {
                             it.photo = updateChat.photo
@@ -196,7 +201,7 @@ open class MClient {
                     }
                 }
                 UpdateChatLastMessage -> {
-                    val updateChat = resObj as TdApi.UpdateChatLastMessage
+                    val updateChat = updObj as TdApi.UpdateChatLastMessage
                     chats[updateChat.chatId]?.let {
                         synchronized(it) {
                             it.lastMessage = updateChat.lastMessage
@@ -205,7 +210,7 @@ open class MClient {
                     }
                 }
                 UpdateChatOrder -> {
-                    val updateChat = resObj as TdApi.UpdateChatOrder
+                    val updateChat = updObj as TdApi.UpdateChatOrder
                     chats[updateChat.chatId]?.let {
                         synchronized(it) {
                             util.setChatOrder(it, updateChat.order)
@@ -213,7 +218,7 @@ open class MClient {
                     }
                 }
                 UpdateChatIsPinned -> {
-                    val updateChat = resObj as TdApi.UpdateChatIsPinned
+                    val updateChat = updObj as TdApi.UpdateChatIsPinned
                     chats[updateChat.chatId]?.let {
                         synchronized(it) {
                             it.isPinned = updateChat.isPinned
@@ -222,7 +227,7 @@ open class MClient {
                     }
                 }
                 UpdateChatReadInbox -> {
-                    val updateChat = resObj as TdApi.UpdateChatReadInbox
+                    val updateChat = updObj as TdApi.UpdateChatReadInbox
                     chats[updateChat.chatId]?.let {
                         synchronized(it) {
                             it.lastReadInboxMessageId = updateChat.lastReadInboxMessageId
@@ -231,7 +236,7 @@ open class MClient {
                     }
                 }
                 UpdateChatReadOutbox -> {
-                    val updateChat = resObj as TdApi.UpdateChatReadOutbox
+                    val updateChat = updObj as TdApi.UpdateChatReadOutbox
                     chats[updateChat.chatId]?.let {
                         synchronized(it) {
                             it.lastReadOutboxMessageId = updateChat.lastReadOutboxMessageId
@@ -239,7 +244,7 @@ open class MClient {
                     }
                 }
                 UpdateChatUnreadMentionCount -> {
-                    val updateChat = resObj as TdApi.UpdateChatUnreadMentionCount
+                    val updateChat = updObj as TdApi.UpdateChatUnreadMentionCount
                     chats[updateChat.chatId]?.let {
                         synchronized(it) {
                             it.unreadMentionCount = updateChat.unreadMentionCount
@@ -247,7 +252,7 @@ open class MClient {
                     }
                 }
                 UpdateMessageMentionRead -> {
-                    val updateChat = resObj as TdApi.UpdateMessageMentionRead
+                    val updateChat = updObj as TdApi.UpdateMessageMentionRead
                     chats[updateChat.chatId]?.let {
                         synchronized(it) {
                             it.unreadMentionCount = updateChat.unreadMentionCount
@@ -255,7 +260,7 @@ open class MClient {
                     }
                 }
                 UpdateChatReplyMarkup -> {
-                    val updateChat = resObj as TdApi.UpdateChatReplyMarkup
+                    val updateChat = updObj as TdApi.UpdateChatReplyMarkup
                     chats[updateChat.chatId]?.let {
                         synchronized(it) {
                             it.replyMarkupMessageId = updateChat.replyMarkupMessageId
@@ -263,7 +268,7 @@ open class MClient {
                     }
                 }
                 UpdateChatDraftMessage -> {
-                    val updateChat = resObj as TdApi.UpdateChatDraftMessage
+                    val updateChat = updObj as TdApi.UpdateChatDraftMessage
                     chats[updateChat.chatId]?.let {
                         synchronized(it) {
                             it.draftMessage = updateChat.draftMessage
@@ -272,7 +277,7 @@ open class MClient {
                     }
                 }
                 UpdateNotificationSettings -> {
-                    val update = resObj as TdApi.UpdateNotificationSettings
+                    val update = updObj as TdApi.UpdateNotificationSettings
                     val scope = update.scope
                     if (scope is TdApi.NotificationSettingsScopeChat) {
                         chats[scope.chatId]?.let {
@@ -281,18 +286,36 @@ open class MClient {
                             }
                         }
                     }
+                    outDbg("<< UpdateNotificationSettings", "$scope: ${update.notificationSettings}")
                 }
                 UpdateUserFullInfo -> {
-                    val updateUserFullInfo = resObj as TdApi.UpdateUserFullInfo
+                    val updateUserFullInfo = updObj as TdApi.UpdateUserFullInfo
                     usersFullInfo[updateUserFullInfo.userId] = updateUserFullInfo.userFullInfo
                 }
                 UpdateBasicGroupFullInfo -> {
-                    val updateBasicGroupFullInfo = resObj as TdApi.UpdateBasicGroupFullInfo
+                    val updateBasicGroupFullInfo = updObj as TdApi.UpdateBasicGroupFullInfo
                     basicGroupsFullInfo[updateBasicGroupFullInfo.basicGroupId] = updateBasicGroupFullInfo.basicGroupFullInfo
                 }
                 UpdateSupergroupFullInfo -> {
-                    val updateSupergroupFullInfo = resObj as TdApi.UpdateSupergroupFullInfo
+                    val updateSupergroupFullInfo = updObj as TdApi.UpdateSupergroupFullInfo
                     supergroupsFullInfo[updateSupergroupFullInfo.supergroupId] = updateSupergroupFullInfo.supergroupFullInfo
+                }
+                UpdateOption -> {
+                    val updateOption = updObj as TdApi.UpdateOption
+                    outDbg("<< UpdateOption", "${updateOption.name} = ${updateOption.value}")
+                }
+                UpdateConnectionState -> {
+                    val updateConState = updObj as TdApi.UpdateConnectionState
+                    outDbg("<< UpdateConnectionState", updateConState)
+                }
+                UpdateNewMessage -> {
+                    val updateNewMessage = updObj as TdApi.UpdateNewMessage
+                    outDbg("<< UpdateNewMessage", updateNewMessage.message)
+                }
+                UpdateDeleteMessages -> {
+                    val updateDelMessage = updObj as TdApi.UpdateDeleteMessages
+                    outDbg("<< UpdateDeleteMessages", updateDelMessage)
+                    TdApi.GetMessage()
                 }
             }
         }
@@ -304,9 +327,9 @@ open class MClient {
         }
     }
 
-    // General purpose functions
-
     private fun send(query: TdApi.Function, resHandler: Client.ResultHandler) {
+        val funType = functionMap[query.constructor]
+        outDbg(">> Send: $funType")
         client?.send(query, resHandler)
     }
 
@@ -317,7 +340,13 @@ open class MClient {
         }
     }
 
-    // Application functions
+    private val outDbgFile = OutputStreamWriter(FileOutputStream("outDbgFile.log", false))
+
+    private fun outDbg(prefix: String, msg: Any? = "") {
+        val msgClean = msg?.toString()?.replace("\n", "")?.replace("  ", " ")
+        outDbgFile.appendln("$prefix: $msgClean")
+        outDbgFile.flush()
+    }
 
     private class OrderedChat (private val order: Long, private val chatId: Long): Comparable<OrderedChat> {
         override fun compareTo(o: OrderedChat): Int {
@@ -334,8 +363,6 @@ open class MClient {
             return this.order == o!!.order && this.chatId == o.chatId
         }
     }
-
-    // Initialization functions
 
     private fun initEnv() {
         System.loadLibrary("tdjni")
@@ -354,9 +381,8 @@ open class MClient {
     }
 
     fun test() {
-        Client.ResultHandler {
-            print(it)
-        }.onResult(Client.execute(TdApi.GetTextEntities("@telegram /test_command https://telegram.org telegram.me @gif @test")))
+        val query = TdApi.GetTextEntities("@telegram /test_command https://telegram.org telegram.me @gif @test")
+        Client.execute(query)
     }
 }
 
